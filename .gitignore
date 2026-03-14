@@ -1,0 +1,30 @@
+# ─── Backend ───
+.env
+__pycache__/
+*.pyc
+*.pyo
+backend/models/*.joblib
+backend/models/*.npy
+backend/data/raw/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+venv/
+.venv/
+
+# ─── Frontend ───
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# ─── IDE ───
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ─── Docker ───
+*.log

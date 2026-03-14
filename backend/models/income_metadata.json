@@ -1,0 +1,43 @@
+{
+  "model": "XGBRegressor",
+  "target": "annual_income_usd",
+  "features": [
+    "age_norm",
+    "years_experience_norm",
+    "study_hours_per_day_norm",
+    "work_hours_per_week_norm",
+    "savings_rate_pct_norm",
+    "exercise_days_per_week_norm",
+    "networking_hours_per_week_norm",
+    "skill_level_norm",
+    "sleep_hours_per_night_norm",
+    "social_media_hours_per_day_norm",
+    "risk_tolerance_norm",
+    "side_project_effort_norm",
+    "education_level",
+    "job_category_encoded",
+    "country_income_tier",
+    "career_score",
+    "financial_discipline",
+    "health_score",
+    "learning_rate",
+    "wellbeing_score",
+    "entrepreneurial_drive"
+  ],
+  "cv_rmse_mean": 14026.247591817291,
+  "cv_r2_mean": 0.3713107558868208,
+  "hyperparameters": {
+    "n_estimators": 500,
+    "max_depth": 6,
+    "learning_rate": 0.05,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "min_child_weight": 5,
+    "reg_alpha": 0.1,
+    "reg_lambda": 1.0,
+    "random_state": 42,
+    "n_jobs": -1
+  },
+  "cv_scheme": "GroupKFold(n_splits=5, groups=country)",
+  "random_seed": 42
+}
