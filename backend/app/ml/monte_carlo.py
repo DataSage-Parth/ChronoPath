@@ -1,8 +1,11 @@
 """
-Monte Carlo simulation engine for ChronoPath (v2 — redesigned).
+Monte Carlo simulation engine for ChronoPath (v3 — calibrated stress).
 
-Incorporates new variables: skill_level, sleep, social_media, risk_tolerance,
-side_project_effort into the growth/happiness/stress models.
+Key change in v3: stress probabilities now use a sigmoid (logistic) transformation
+instead of raw linear scores. This ensures:
+  - probabilities are smooth and asymptotically bounded
+  - output never reaches exactly 0% or 100%
+  - final range is clamped to [5%, 95%] for realism
 
 Noise model: Gaussian perturbation based on model residuals (RMSE from validation).
 All random seeds are explicit for reproducibility.
@@ -12,6 +15,8 @@ import numpy as np
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 
+
+# ── Constants ──
 
 # Industry-specific growth rate bonuses
 JOB_GROWTH_RATES = {
@@ -24,7 +29,7 @@ JOB_GROWTH_RATES = {
     "government": 0.003,
 }
 
-# Industry-specific stress multipliers
+# Industry-specific stress multipliers (contribution to logit score)
 JOB_STRESS_MULT = {
     "technology": 0.6,
     "finance": 0.8,
@@ -34,6 +39,25 @@ JOB_STRESS_MULT = {
     "education": 0.3,
     "government": 0.3,
 }
+
+# Stress probability floor/ceiling
+STRESS_PROB_MIN = 0.05
+STRESS_PROB_MAX = 0.95
+
+
+def _sigmoid(x: np.ndarray) -> np.ndarray:
+    """Numerically stable sigmoid function."""
+    return np.where(
+        x >= 0,
+        1.0 / (1.0 + np.exp(-x)),
+        np.exp(x) / (1.0 + np.exp(x)),
+    )
+
+
+def _logit(p: float) -> float:
+    """Inverse sigmoid — convert probability to log-odds."""
+    p = np.clip(p, 1e-6, 1 - 1e-6)
+    return float(np.log(p / (1 - p)))
 
 
 @dataclass
@@ -45,7 +69,7 @@ class SimulationConfig:
     income_growth_base: float = 0.03   # 3% annual baseline growth
     income_noise_std: float = 0.12     # Std dev of income noise
     happiness_noise_std: float = 0.8   # Std dev on 0-10 scale
-    stress_noise_std: float = 0.10     # Std dev for stress probability
+    stress_logit_noise_std: float = 0.35  # Noise in logit space (wider but bounded by sigmoid)
 
 
 def run_monte_carlo(
@@ -86,10 +110,9 @@ def run_monte_carlo(
     network_boost = user_features.get("networking_hours_per_week", 0) * 0.003
     education_boost = user_features.get("education_level", 2) * 0.008
     savings_compound = user_features.get("savings_rate_pct", 10) * 0.0008
-    skill_boost = user_features.get("skill_level", 5) * 0.004          # NEW: +0.4% per skill level
-    side_project_boost = user_features.get("side_project_effort", 0) * 0.003  # NEW: +0.3% per effort unit
+    skill_boost = user_features.get("skill_level", 5) * 0.004
+    side_project_boost = user_features.get("side_project_effort", 0) * 0.003
 
-    # Industry-specific growth bonus
     job_cat = user_features.get("job_category", "technology")
     industry_boost = JOB_GROWTH_RATES.get(job_cat, 0.008)
 
@@ -124,10 +147,8 @@ def run_monte_carlo(
     # ── HAPPINESS SIMULATION ──
     exercise_effect = user_features.get("exercise_days_per_week", 3) * 0.05
     overwork_effect = max(0, user_features.get("work_hours_per_week", 40) - 40) * (-0.02)
-    # NEW: sleep contributes positively (optimal ~7-8h, penalty below 6h)
     sleep_hrs = user_features.get("sleep_hours_per_night", 7)
     sleep_effect = min(0.3, max(-0.5, (sleep_hrs - 6) * 0.15))
-    # NEW: excessive social media reduces happiness
     social_media = user_features.get("social_media_hours_per_day", 2)
     social_media_effect = max(0, social_media - 2) * (-0.05)
 
@@ -144,28 +165,72 @@ def run_monte_carlo(
 
     happiness_trajectories = np.clip(happiness_trajectories, 0, 10)
 
-    # ── STRESS SIMULATION ──
-    work_pressure = user_features.get("work_hours_per_week", 40) / 70.0 * 0.01
-    # NEW: sleep deficit increases stress
-    sleep_deficit_pressure = max(0, (7 - sleep_hrs) * 0.02)
-    # NEW: industry stress multiplier
-    industry_stress = JOB_STRESS_MULT.get(job_cat, 0.5) * 0.005
-    # NEW: risk tolerance slightly increases stress (high-stakes decisions)
-    risk_stress = user_features.get("risk_tolerance", 5) * 0.002
-    # NEW: exercise reduces stress accumulation
-    exercise_relief = user_features.get("exercise_days_per_week", 3) * (-0.003)
+    # ──────────────────────────────────────────────────────────────────
+    # STRESS SIMULATION — Sigmoid-calibrated probabilities
+    #
+    # How it works:
+    #   1. Convert the base stress probability to logit (log-odds) space.
+    #   2. Compute normalized stress factors (each in [0, 1]).
+    #   3. Combine them as weighted contributions to the logit score.
+    #   4. Add Gaussian noise in logit space (noise stays bounded after sigmoid).
+    #   5. Apply sigmoid → smooth probability in (0, 1).
+    #   6. Clamp to [5%, 95%] for presentation realism.
+    #
+    # This ensures stress scales gradually and never reaches 0% or 100%,
+    # even under extreme combinations of high-stress inputs.
+    # ──────────────────────────────────────────────────────────────────
 
+    # Step 1: Convert base probability to logit space
+    base_logit = _logit(base_stress_probability)
+
+    # Step 2: Normalize stress-driving features to [0, 1]
+    work_hours = user_features.get("work_hours_per_week", 40)
+    exercise_days = user_features.get("exercise_days_per_week", 3)
+    risk_tol = user_features.get("risk_tolerance", 5)
+    study_hours = user_features.get("study_hours_per_day", 2)
+
+    work_norm = np.clip((work_hours - 20) / 50.0, 0, 1)         # 20-70 hrs → [0, 1]
+    sleep_deficit_norm = np.clip((7 - sleep_hrs) / 3.0, 0, 1)    # 7h = 0, 4h = 1
+    exercise_norm = np.clip(exercise_days / 7.0, 0, 1)           # 0-7 → [0, 1]
+    social_norm = np.clip(social_media / 8.0, 0, 1)              # 0-8 → [0, 1]
+    risk_norm = np.clip(risk_tol / 10.0, 0, 1)                   # 0-10 → [0, 1]
+    study_overload_norm = np.clip((study_hours - 3) / 3.0, 0, 1) # >3h starts adding stress
+    industry_mult = JOB_STRESS_MULT.get(job_cat, 0.5)            # already [0, 1]
+
+    # Step 3: Weighted logit contributions (positive = more stress, negative = less)
+    # Weights tuned so that even with ALL factors maxed, the logit score
+    # tops out around +3 (sigmoid(+3) ≈ 95%) rather than infinity.
+    logit_contribution = (
+        work_norm * 1.2                  # heavy work is the biggest stress driver
+        + sleep_deficit_norm * 0.9       # sleep loss is second-biggest
+        + industry_mult * 0.5            # high-stress industries add pressure
+        + social_norm * 0.3              # excessive social media adds distraction stress
+        + risk_norm * 0.25               # high financial risk adds anxiety
+        + study_overload_norm * 0.2      # excessive study adds to overwhelm
+        - exercise_norm * 0.7            # exercise is the best stress reliever
+    )
+
+    # Step 4: Simulate in logit space with noise
     stress_noise = rng.normal(
         loc=0,
-        scale=config.stress_noise_std,
+        scale=config.stress_logit_noise_std,
         size=(config.n_simulations, config.years_horizon),
     )
+
     stress_trajectories = np.zeros((config.n_simulations, config.years_horizon))
     for t in range(config.years_horizon):
-        pressure = (work_pressure + sleep_deficit_pressure + industry_stress + risk_stress + exercise_relief) * (t + 1) * 0.5
-        stress_trajectories[:, t] = base_stress_probability + pressure + stress_noise[:, t]
+        # Time-dependent pressure accumulation (logarithmic, not linear)
+        # This prevents late-year scores from exploding
+        time_drift = logit_contribution * np.log1p(t + 1) * 0.3
 
-    stress_trajectories = np.clip(stress_trajectories, 0, 1)
+        # Raw logit score = base + lifestyle adjustment + time drift + noise
+        raw_logit = base_logit + logit_contribution + time_drift + stress_noise[:, t]
+
+        # Step 5: Sigmoid transformation → probability in (0, 1)
+        prob = _sigmoid(raw_logit)
+
+        # Step 6: Clamp to [5%, 95%]
+        stress_trajectories[:, t] = np.clip(prob, STRESS_PROB_MIN, STRESS_PROB_MAX)
 
     # ── COMPUTE PERCENTILES ──
     percentile_keys = [5, 25, 50, 75, 95]
